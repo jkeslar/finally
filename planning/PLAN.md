@@ -101,7 +101,7 @@ finally/
 ├── db/                       # Volume mount target (SQLite file lives here at runtime)
 │   └── .gitkeep              # Directory exists in repo; finally.db is gitignored
 ├── Dockerfile                # Multi-stage build (Node → Python)
-├── docker-compose.yml        # Optional convenience wrapper
+├── docker-compose.yml        # Canonical run config (volume, port, env file); start/stop scripts wrap this
 ├── .env                      # Environment variables (gitignored, .env.example committed)
 └── .gitignore
 ```
@@ -155,6 +155,15 @@ Both the simulator and the Massive client implement the same abstract interface.
 - Occasional random "events" — sudden 2-5% moves on a ticker for drama
 - Starts from realistic seed prices (e.g., AAPL ~$190, GOOGL ~$175, etc.)
 - Runs as an in-process background task — no external dependencies
+
+### Dynamically Added / Unlisted Tickers
+
+Tickers can be added to the watchlist beyond the 10 pre-seeded defaults (manually or via the AI chat). Behavior differs by source, but the price cache is always the single source of truth for "is this ticker tradable":
+
+- **Simulator**: an unrecognized ticker gets a random starting price ($50–$300) and default GBM parameters (moderate drift/volatility, 0.3 correlation with everything else), so it always ends up with a live price immediately.
+- **Massive**: an invalid/unrecognized symbol simply never appears in the poll response, so it never gets a price in the cache — there's no explicit "invalid ticker" error, just an absent price.
+
+Because both cases converge on the same signal, trade and watchlist validation should check **"does the price cache have a current price for this ticker?"** rather than maintaining a separate list of valid symbols.
 
 ### Massive API (Optional)
 
@@ -244,6 +253,19 @@ All tables include a `user_id` column defaulting to `"default"`. This is hardcod
 - One user profile: `id="default"`, `cash_balance=10000.0`
 - Ten watchlist entries: AAPL, GOOGL, MSFT, AMZN, TSLA, NVDA, META, JPM, V, NFLX
 
+### Cost Basis & P&L
+
+- `positions.avg_cost` is a **weighted average cost basis**. A buy recomputes it as `(old_qty * old_avg_cost + new_qty * fill_price) / (old_qty + new_qty)`. A sell reduces `quantity` but leaves `avg_cost` unchanged; if `quantity` reaches zero, the position row is deleted.
+- Only **unrealized** P&L is tracked/displayed (current price vs. `avg_cost` on open positions, per §10's positions table). Realized P&L (gains/losses actually locked in by sells) is out of scope for this build — the `trades` log is sufficient to reconstruct it later if needed.
+
+### Money as Floating Point
+
+`cash_balance`, `price`, `avg_cost`, and `total_value` are all SQLite `REAL` (floating point), not fixed-point/integer cents. This is an accepted tradeoff for a simulated-money demo app — simplicity over cent-level precision. Round to 2 decimal places for display; don't introduce integer-cents storage unless real-money accuracy becomes a requirement.
+
+### Multi-User Scaffolding
+
+The `user_id` column on every table (hardcoded to `"default"`) is a deliberate forward-compat hook, kept intentionally even though multi-user support isn't being built now — the cost of carrying it is low and it avoids a schema migration later.
+
 ---
 
 ## 8. API Endpoints
@@ -257,25 +279,26 @@ All tables include a `user_id` column defaulting to `"default"`. This is hardcod
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/api/portfolio` | Current positions, cash balance, total value, unrealized P&L |
-| POST | `/api/portfolio/trade` | Execute a trade: `{ticker, quantity, side}` |
+| POST | `/api/portfolio/trade` | Execute a trade: `{ticker, quantity, side}`. Rejected with a validation error if the ticker has no current price in the price cache (i.e., it isn't tracked — see §6, "Dynamically Added / Unlisted Tickers") |
 | GET | `/api/portfolio/history` | Portfolio value snapshots over time (for P&L chart) |
 
 ### Watchlist
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/api/watchlist` | Current watchlist tickers with latest prices |
-| POST | `/api/watchlist` | Add a ticker: `{ticker}` |
-| DELETE | `/api/watchlist/{ticker}` | Remove a ticker |
+| GET | `/api/watchlist` | Current watchlist tickers (ticker + added_at). Does **not** include prices — live prices come exclusively from the SSE stream once connected, so there's one source of price truth, not two |
+| POST | `/api/watchlist` | Add a ticker: `{ticker}`. Adding a ticker already on the watchlist is a no-op (still returns success) |
+| DELETE | `/api/watchlist/{ticker}` | Remove a ticker. Removing a ticker not on the watchlist is a no-op (still returns success) |
 
 ### Chat
 | Method | Path | Description |
 |--------|------|-------------|
 | POST | `/api/chat` | Send a message, receive complete JSON response (message + executed actions) |
+| GET | `/api/chat/history` | Load persisted conversation history, so the chat panel can be restored on page reload instead of starting empty |
 
 ### System
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/api/health` | Health check (for Docker/deployment) |
+| GET | `/api/health` | Liveness check only (process is up) — for Docker/deployment; does not probe the database or market data source |
 
 ---
 
@@ -290,7 +313,7 @@ There is an OPENROUTER_API_KEY in the .env file in the project root.
 When the user sends a chat message, the backend:
 
 1. Loads the user's current portfolio context (cash, positions with P&L, watchlist with live prices, total portfolio value)
-2. Loads recent conversation history from the `chat_messages` table
+2. Loads recent conversation history from the `chat_messages` table — the most recent 20 messages (10 user/assistant exchanges), to bound prompt size over a long session
 3. Constructs a prompt with a system message, portfolio context, conversation history, and the user's new message
 4. Calls the LLM via LiteLLM → OpenRouter, requesting structured output, using the cerebras-inference skill
 5. Parses the complete structured JSON response
@@ -315,8 +338,8 @@ The LLM is instructed to respond with JSON matching this schema:
 ```
 
 - `message` (required): The conversational text shown to the user
-- `trades` (optional): Array of trades to auto-execute. Each trade goes through the same validation as manual trades (sufficient cash for buys, sufficient shares for sells)
-- `watchlist_changes` (optional): Array of watchlist modifications
+- `trades` (optional): Array of trades to auto-execute. Each trade goes through the same validation as manual trades (sufficient cash for buys, sufficient shares for sells, and the ticker must have a current price in the price cache — see §8)
+- `watchlist_changes` (optional): Array of watchlist modifications. `action` is `"add"` or `"remove"`; both are idempotent (adding an already-watched ticker or removing one that isn't watched is a no-op, not an error)
 
 ### Auto-Execution
 
@@ -352,19 +375,21 @@ When `LLM_MOCK=true`, the backend returns deterministic mock responses instead o
 
 The frontend is a single-page application with a dense, terminal-inspired layout. The specific component architecture and layout system is up to the Frontend Engineer, but the UI should include these elements:
 
-- **Watchlist panel** — grid/table of watched tickers with: ticker symbol, current price (flashing green/red on change), daily change %, and a sparkline mini-chart (accumulated from SSE since page load)
+- **Watchlist panel** — grid/table of watched tickers with: ticker symbol, current price (flashing green/red on change), daily change %, and a sparkline mini-chart (accumulated from SSE since page load). The ticker list itself comes from `GET /api/watchlist`; prices populate progressively as SSE events arrive after connect
 - **Main chart area** — larger chart for the currently selected ticker, with at minimum price over time. Clicking a ticker in the watchlist selects it here.
 - **Portfolio heatmap** — treemap visualization where each rectangle is a position, sized by portfolio weight, colored by P&L (green = profit, red = loss)
 - **P&L chart** — line chart showing total portfolio value over time, using data from `portfolio_snapshots`
 - **Positions table** — tabular view of all positions: ticker, quantity, avg cost, current price, unrealized P&L, % change
 - **Trade bar** — simple input area: ticker field, quantity field, buy button, sell button. Market orders, instant fill.
-- **AI chat panel** — docked/collapsible sidebar. Message input, scrolling conversation history, loading indicator while waiting for LLM response. Trade executions and watchlist changes shown inline as confirmations.
+- **AI chat panel** — docked/collapsible sidebar. On load, hydrates conversation history from `GET /api/chat/history` so a page refresh doesn't lose it. Message input, scrolling conversation history, loading indicator while waiting for LLM response. Trade executions and watchlist changes shown inline as confirmations.
 - **Header** — portfolio total value (updating live), connection status indicator, cash balance
 
 ### Technical Notes
 
 - Use `EventSource` for SSE connection to `/api/stream/prices`
-- Canvas-based charting library preferred (Lightweight Charts or Recharts) for performance
+- **Charting libraries, split by responsibility** (not left as an open "either/or"):
+  - **Lightweight Charts** (canvas-based) for all time-series: watchlist sparklines, the main detail chart, and the P&L chart. It's purpose-built for exactly this and performs well under frequent SSE-driven updates.
+  - **Recharts** (SVG-based) for the portfolio heatmap only, using its built-in `Treemap` component — Lightweight Charts has no treemap support, so this isn't a case of arbitrarily using two libraries for the same job.
 - Price flash effect: on receiving a new price, briefly apply a CSS class with background color transition, then remove it
 - All API calls go to the same origin (`/api/*`) — no CORS configuration needed
 - Tailwind CSS for styling with a custom dark theme
@@ -393,25 +418,25 @@ FastAPI serves the static frontend files and all API routes on port 8000.
 
 ### Docker Volume
 
-The SQLite database persists via a named Docker volume:
+The SQLite database persists via a **bind mount** of the project's `db/` directory (not a named volume) — this matches §4, where `db/` is described as the host-visible runtime mount target, and keeps `finally.db` directly inspectable on the host:
 
 ```bash
-docker run -v finally-data:/app/db -p 8000:8000 --env-file .env finally
+docker run -v "$(pwd)/db:/app/db" -p 8000:8000 --env-file .env finally
 ```
 
 The `db/` directory in the project root maps to `/app/db` in the container. The backend writes `finally.db` to this path.
 
 ### Start/Stop Scripts
 
+`docker-compose.yml` is the canonical definition of the volume mount, port mapping, and env file — not a second, separately-maintained copy of those flags. The start/stop scripts are thin wrappers around `docker compose` so there's exactly one place the run configuration lives:
+
 **`scripts/start_mac.sh`** (macOS/Linux):
-- Builds the Docker image if not already built (or if `--build` flag passed)
-- Runs the container with the volume mount, port mapping, and `.env` file
+- Runs `docker compose up -d --build` (Compose handles rebuilding the image if source changed)
 - Prints the URL to access the app
 - Optionally opens the browser
 
 **`scripts/stop_mac.sh`** (macOS/Linux):
-- Stops and removes the running container
-- Does NOT remove the volume (data persists)
+- Runs `docker compose down` (does NOT remove the volume — data persists)
 
 **`scripts/start_windows.ps1`** / **`scripts/stop_windows.ps1`**: PowerShell equivalents for Windows.
 
@@ -454,3 +479,26 @@ The container is designed to deploy to AWS App Runner, Render, or any container 
 - Portfolio visualization: heatmap renders with correct colors, P&L chart has data points
 - AI chat (mocked): send a message, receive a response, trade execution appears inline
 - SSE resilience: disconnect and verify reconnection
+
+---
+
+## 13. Doc Review — Resolved
+
+A prior review pass raised 10 questions and 4 simplification opportunities against this document. All are now resolved and incorporated into the sections above:
+
+| # | Item | Resolution |
+|---|------|------------|
+| 1 | Volume mount contradiction (§4 vs §11) | Standardized on a bind mount; §11 updated |
+| 2 | Trading tickers outside the watchlist | §8: trade requires a current price in the cache |
+| 3 | Unlisted/arbitrary tickers in simulator mode | §6: documented actual fallback behavior (already implemented) |
+| 4 | Unbounded chat history in prompts | §9: capped at the most recent 20 messages |
+| 5 | No read endpoint for chat history | §8: added `GET /api/chat/history` |
+| 6 | Average cost / realized P&L method | §7: weighted-average cost basis; realized P&L out of scope |
+| 7 | Money as floating point | §7: accepted tradeoff, documented explicitly |
+| 8 | `watchlist_changes.action` values and edge cases | §9: `"add"`/`"remove"`, both idempotent |
+| 9 | Recharts mislabeled as canvas-based | §10: split responsibility — Lightweight Charts for time-series, Recharts for the treemap only |
+| 10 | Scope of `/api/health` | §8: liveness-only, documented |
+| 11 (simplification) | One charting library vs. "preferred" | §10: resolved via #9's split |
+| 12 (simplification) | `GET /api/watchlist` redundant with SSE | §8: watchlist endpoint no longer returns prices |
+| 13 (simplification) | Two parallel launch paths | §11: scripts now wrap `docker compose` |
+| 14 (simplification) | `user_id` scaffolding on every table | Confirmed intentional — kept as-is (project owner's call) |
