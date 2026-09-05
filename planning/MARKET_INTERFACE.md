@@ -7,11 +7,11 @@ where prices actually come from.
 
 **Status**: this describes the interface as actually implemented in
 `backend/app/market/` (see `planning/MARKET_DATA_SUMMARY.md` for the build
-summary). It supersedes `planning/archive/MARKET_INTERFACE.md`, which was the
-pre-implementation sketch; a few details below (the data model's shape, how the
-cache computes `change`, factory logging) changed slightly during implementation.
-For the Massive-specific half of this, see `planning/MASSIVE_API.md`; for the
-simulator half, see `planning/MARKET_SIMULATOR.md`.
+summary). It supersedes the original pre-implementation sketch of this document;
+a few details below (the data model's shape, how the cache computes `change`,
+factory logging) changed slightly during implementation. For the Massive-specific
+half of this, see `planning/MASSIVE_API.md`; for the simulator half, see
+`planning/MARKET_SIMULATOR.md`.
 
 ## Core Data Model
 

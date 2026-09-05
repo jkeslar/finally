@@ -8,10 +8,10 @@ running FinAlly for the first time never touch the Massive API at all.
 `backend/app/market/simulator.py` and `backend/app/market/seed_prices.py`,
 covered by 17 tests in `backend/tests/market/test_simulator.py` plus 10
 integration tests in `test_simulator_source.py` (98% line coverage on
-`simulator.py`). It supersedes `planning/archive/MARKET_SIMULATOR.md`, the
-pre-implementation sketch; the math and structure below match what shipped
-almost exactly, with the differences noted inline. For where this plugs into the
-rest of the market data layer, see `planning/MARKET_INTERFACE.md`.
+`simulator.py`). It supersedes the original pre-implementation sketch of this
+document; the math and structure below match what shipped almost exactly, with
+the differences noted inline. For where this plugs into the rest of the market
+data layer, see `planning/MARKET_INTERFACE.md`.
 
 ## Overview
 
