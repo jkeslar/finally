@@ -4,9 +4,9 @@ Verified reference documentation for the Massive REST API and its official Pytho
 client, as used by FinAlly's `MassiveDataSource` (`backend/app/market/massive_client.py`).
 
 Researched directly against the vendor's current docs and the `massive-com/client-python`
-source on 2026-09-04 (sources listed at the bottom). This supersedes
-`planning/archive/MASSIVE_API.md`, which predates verification and gets several
-Python attribute names wrong (see "Corrections vs. the earlier draft" below).
+source on 2026-09-04 (sources listed at the bottom). This supersedes the original
+pre-verification draft of this document, which got several Python attribute names
+wrong (see "Corrections vs. the Earlier Draft" below).
 
 ## Overview
 
@@ -260,17 +260,17 @@ first poll in `start()`) and failing fast is the natural place to do it.
 
 ## Corrections vs. the Earlier Draft
 
-`planning/archive/MASSIVE_API.md` (written before this verification pass) has two
-inaccuracies worth flagging so they aren't propagated:
+The original draft of this document (written before this verification pass) had
+two inaccuracies worth flagging so they aren't propagated:
 
-1. It reads previous close as `snap.day.previous_close` — that field doesn't
+1. It read previous close as `snap.day.previous_close` — that field doesn't
    exist. Previous close is `snap.prev_day.close`.
-2. It reads day change as `snap.day.change_percent` — that field lives at the
+2. It read day change as `snap.day.change_percent` — that field lives at the
    top level as `snap.todays_change_percent`, not nested under `day`.
 
-Neither bug is currently reachable in production: `massive_client.py` only ever
+Neither bug was ever reachable in production: `massive_client.py` only ever
 reads `last_trade.price` and `last_trade.timestamp`, so the wrong field names in
-the archived design doc were never actually executed.
+the earlier draft were never actually executed.
 
 ## Sources
 
